@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">Locked</string>
+    <string name="title_nfc_blocker">NFC App Blocker</string>
+    <string name="status_scan_to_unlock">Scan NFC tag to unlock apps</string>
+    <string name="button_select_apps">Select Apps to Block</string>
+    <string name="button_enable_blocking">Enable App Blocking</string>
+    <string name="blocked_apps_none">Blocked Apps: None</string>
+    <string name="toast_nfc_unavailable">NFC not available on this device</string>
+    <string name="toast_app_selection_soon">App selection coming soon</string>
+    <string name="toast_enable_accessibility">Enable in Settings > Accessibility</string>
+    <string name="toast_apps_locked">Apps locked!</string>
+    <string name="toast_apps_unlocked">Apps unlocked!</string>
+    <string name="status_locked">Apps are LOCKED\nScan NFC tag to unlock</string>
+    <string name="status_unlocked">Apps are UNLOCKED\nScan NFC tag to lock</string>
+</resources>
