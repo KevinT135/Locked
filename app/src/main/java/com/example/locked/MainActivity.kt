@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Process
 import android.provider.Settings
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -40,6 +41,7 @@ class MainActivity : ComponentActivity() {
     private lateinit var repository: LockedRepository
     private lateinit var predictor: UsagePredictor
     private var isLocked by mutableStateOf(true)
+    private var hasUsagePermission by mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -49,12 +51,20 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         repository = LockedRepository(applicationContext)
         predictor = UsagePredictor(applicationContext)
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
+
+        // Check permissions
+        hasUsagePermission = hasUsageStatsPermission()
+        Log.d(TAG, "Has usage permission: $hasUsagePermission")
 
         // Check if we should show blocked message
         val showBlockedMessage = intent.getBooleanExtra("show_blocked_message", false)
@@ -71,6 +81,7 @@ class MainActivity : ComponentActivity() {
             MaterialTheme {
                 LockedApp(
                     isLocked = isLocked,
+                    hasUsagePermission = hasUsagePermission,
                     showBlockedMessage = showBlockedMessage,
                     onNfcScan = { handleNfcToggle() },
                     repository = repository,
@@ -84,6 +95,16 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         enableNfcForegroundDispatch()
+
+        // Recheck permission status
+        val hadPermission = hasUsagePermission
+        hasUsagePermission = hasUsageStatsPermission()
+
+        if (!hadPermission && hasUsagePermission) {
+            Toast.makeText(this, "Usage permission granted! You can now lock apps.", Toast.LENGTH_LONG).show()
+        }
+
+        Log.d(TAG, "onResume - Has usage permission: $hasUsagePermission")
     }
 
     override fun onPause() {
@@ -108,20 +129,50 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleNfcToggle() {
+        if (!hasUsageStatsPermission()) {
+            Toast.makeText(
+                this,
+                "Please grant Usage Access permission first!",
+                Toast.LENGTH_LONG
+            ).show()
+            requestUsageStatsPermission()
+            return
+        }
+
         isLocked = !isLocked
+        Log.d(TAG, "NFC toggle - isLocked: $isLocked")
 
         val serviceIntent = Intent(this, AppBlockingService::class.java).apply {
             action = if (isLocked) AppBlockingService.ACTION_LOCK else AppBlockingService.ACTION_UNLOCK
         }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
 
-        val message = if (isLocked) "Apps locked!" else "Apps unlocked!"
-        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+            lifecycleScope.launch {
+                if (isLocked) {
+                    repository.startBlockingSession()
+                } else {
+                    repository.endBlockingSession("nfc")
+                }
+            }
+
+            val message = if (isLocked) {
+                "Apps locked! Service is monitoring."
+            } else {
+                "Apps unlocked!"
+            }
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+
+            Log.d(TAG, "Service command sent: ${if (isLocked) "LOCK" else "UNLOCK"}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting service", e)
+            Toast.makeText(this, "Error starting service: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun enableNfcForegroundDispatch() {
@@ -141,8 +192,23 @@ class MainActivity : ComponentActivity() {
     private fun requestUsageStatsPermission() {
         if (!hasUsageStatsPermission()) {
             val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
-            startActivity(intent)
-            Toast.makeText(this, "Please enable usage access for Locked", Toast.LENGTH_LONG).show()
+
+            try {
+                startActivity(intent)
+                Toast.makeText(
+                    this,
+                    "Find 'Locked' in the list and enable it",
+                    Toast.LENGTH_LONG
+                ).show()
+            } catch (e: Exception) {
+                Toast.makeText(
+                    this,
+                    "Go to: Settings > Apps > Special Access > Usage Access",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        } else {
+            Toast.makeText(this, "Usage access already granted!", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -170,6 +236,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun LockedApp(
     isLocked: Boolean,
+    hasUsagePermission: Boolean,
     showBlockedMessage: Boolean,
     onNfcScan: () -> Unit,
     repository: LockedRepository,
@@ -177,8 +244,6 @@ fun LockedApp(
     onRequestUsagePermission: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     Scaffold(
         topBar = {
@@ -191,6 +256,41 @@ fun LockedApp(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
+            // Permission warning banner
+            if (!hasUsagePermission) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Permission Required",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "App blocking won't work without Usage Access",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        TextButton(onClick = onRequestUsagePermission) {
+                            Text("Grant")
+                        }
+                    }
+                }
+            }
+
             TabRow(selectedTabIndex = selectedTab) {
                 Tab(
                     selected = selectedTab == 0,
@@ -212,6 +312,7 @@ fun LockedApp(
             when (selectedTab) {
                 0 -> StatusScreen(
                     isLocked = isLocked,
+                    hasUsagePermission = hasUsagePermission,
                     showBlockedMessage = showBlockedMessage,
                     predictor = predictor,
                     onRequestPermission = onRequestUsagePermission
@@ -226,6 +327,7 @@ fun LockedApp(
 @Composable
 fun StatusScreen(
     isLocked: Boolean,
+    hasUsagePermission: Boolean,
     showBlockedMessage: Boolean,
     predictor: UsagePredictor,
     onRequestPermission: () -> Unit
@@ -282,7 +384,7 @@ fun StatusScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = if (isLocked) "LOCKED" else "UNLOCKED",
+                    text = if (isLocked) "LOCKED" else "NLOCKED",
                     style = MaterialTheme.typography.headlineLarge,
                     fontWeight = FontWeight.Bold
                 )
@@ -294,6 +396,15 @@ fun StatusScreen(
                         "Scan NFC tag to lock apps",
                     style = MaterialTheme.typography.bodyLarge
                 )
+
+                if (isLocked && hasUsagePermission) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "✓ Service monitoring active",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
             }
         }
 
@@ -340,22 +451,36 @@ fun StatusScreen(
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
-                    "Setup Instructions",
+                    "Setup Checklist",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                Text("1. Enable Usage Access permission")
-                Text("2. Select apps to block in the 'Select Apps' tab")
-                Text("3. Scan any NFC tag to lock/unlock")
-                Text("4. Keep the service running in the background")
 
-                Spacer(modifier = Modifier.height(16.dp))
-                Button(
-                    onClick = onRequestPermission,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Grant Usage Access Permission")
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (hasUsagePermission) "UNLOCKED" else "LOCKED")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("1. Enable Usage Access permission")
+                }
+                Text("   2. Select apps to block in 'Select Apps' tab")
+                Text("   3. Scan NFC tag to lock")
+                Text("   4. Try opening a blocked app to test")
+
+                if (!hasUsagePermission) {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(
+                        onClick = onRequestPermission,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Grant Usage Access Permission")
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        "Look for 'Locked' or 'com.example.locked' in the settings list",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -378,6 +503,24 @@ fun AppSelectionScreen(repository: LockedRepository) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        if (blockedApps.isNotEmpty()) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp, 8.dp, 16.dp, 0.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                )
+            ) {
+                Text(
+                    "✓ ${blockedApps.size} apps will be blocked when locked",
+                    modifier = Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+        }
+
         if (isLoading) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -466,6 +609,9 @@ fun InsightsScreen(repository: LockedRepository) {
                     if (recentEvents.isNotEmpty()) {
                         val avgDuration = recentEvents.map { it.sessionDuration }.average() / 60000
                         Text("Avg Session: %.1f minutes".format(avgDuration))
+
+                        val blockedCount = recentEvents.count { it.wasBlocked }
+                        Text("Blocked Attempts: $blockedCount")
                     }
                 }
             }
@@ -496,7 +642,8 @@ fun InsightsScreen(repository: LockedRepository) {
                         Text(
                             "Blocked attempt",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.Bold
                         )
                     }
                 }
