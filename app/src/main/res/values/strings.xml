@@ -12,4 +12,5 @@
     <string name="toast_apps_unlocked">Apps unlocked!</string>
     <string name="status_locked">Apps are LOCKED\nScan NFC tag to unlock</string>
     <string name="status_unlocked">Apps are UNLOCKED\nScan NFC tag to lock</string>
+    <string name="accessibility_service_description">Locked uses this service to detect when you open blocked apps and show a blocking screen to help you stay focused. This service does not collect or share any personal data.</string>
 </resources>

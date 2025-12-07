@@ -317,7 +317,7 @@ fun LockedApp(
                     predictor = predictor,
                     onRequestPermission = onRequestUsagePermission
                 )
-                1 -> AppSelectionScreen(repository = repository)
+                1 -> AppSelectionScreen(repository = repository, isLocked = isLocked)
                 2 -> InsightsScreen(repository = repository)
             }
         }
@@ -384,7 +384,7 @@ fun StatusScreen(
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 Text(
-                    text = if (isLocked) "LOCKED" else "NLOCKED",
+                    text = if (isLocked) "🔒 LOCKED" else "🔓 UNLOCKED",
                     style = MaterialTheme.typography.headlineLarge,
                     fontWeight = FontWeight.Bold
                 )
@@ -458,7 +458,7 @@ fun StatusScreen(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (hasUsagePermission) "UNLOCKED" else "LOCKED")
+                    Text(if (hasUsagePermission) "✅" else "❌")
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("1. Enable Usage Access permission")
                 }
@@ -488,7 +488,7 @@ fun StatusScreen(
 }
 
 @Composable
-fun AppSelectionScreen(repository: LockedRepository) {
+fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val blockedApps by repository.getAllBlockedApps().collectAsState(initial = emptyList())
@@ -503,7 +503,30 @@ fun AppSelectionScreen(repository: LockedRepository) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        if (blockedApps.isNotEmpty()) {
+        // Warning banner when locked
+        if (isLocked) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp, 8.dp, 16.dp, 0.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "⚠️ Apps are currently LOCKED",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        "Unlock with NFC to modify blocked apps",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+        } else if (blockedApps.isNotEmpty()) {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -540,18 +563,32 @@ fun AppSelectionScreen(repository: LockedRepository) {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         onClick = {
-                            scope.launch {
-                                if (isBlocked) {
-                                    repository.setAppBlocked(app.packageName, false)
-                                } else {
-                                    repository.addBlockedApp(
-                                        packageName = app.packageName,
-                                        appName = app.appName,
-                                        category = app.category
-                                    )
+                            if (!isLocked) {
+                                scope.launch {
+                                    if (isBlocked) {
+                                        repository.setAppBlocked(app.packageName, false)
+                                    } else {
+                                        repository.addBlockedApp(
+                                            packageName = app.packageName,
+                                            appName = app.appName,
+                                            category = app.category
+                                        )
+                                    }
                                 }
+                            } else {
+                                Toast.makeText(
+                                    context,
+                                    "Unlock first to modify blocked apps",
+                                    Toast.LENGTH_SHORT
+                                ).show()
                             }
-                        }
+                        },
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isLocked)
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            else
+                                MaterialTheme.colorScheme.surface
+                        )
                     ) {
                         Row(
                             modifier = Modifier
@@ -564,17 +601,24 @@ fun AppSelectionScreen(repository: LockedRepository) {
                                 Text(
                                     app.appName,
                                     style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Medium
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (isLocked)
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                    else
+                                        MaterialTheme.colorScheme.onSurface
                                 )
                                 Text(
                                     app.category,
                                     style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                        alpha = if (isLocked) 0.5f else 1f
+                                    )
                                 )
                             }
                             Checkbox(
                                 checked = isBlocked,
-                                onCheckedChange = null
+                                onCheckedChange = null,
+                                enabled = !isLocked
                             )
                         }
                     }
@@ -640,7 +684,7 @@ fun InsightsScreen(repository: LockedRepository) {
                     )
                     if (event.wasBlocked) {
                         Text(
-                            "Blocked attempt",
+                            "✋ Blocked attempt",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                             fontWeight = FontWeight.Bold

@@ -1,7 +1,11 @@
 package com.example.locked
 
+import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
@@ -24,11 +28,14 @@ import androidx.core.view.WindowInsetsControllerCompat
 /**
  * Fullscreen activity that blocks access to restricted apps
  * Shows a clear message and requires NFC scan to dismiss
+ * Actively closes the blocked app in the background
  */
 class BlockingActivity : ComponentActivity() {
 
     private var blockedAppName: String = ""
     private var blockedPackageName: String = ""
+    private val handler = Handler(Looper.getMainLooper())
+    private var killAppRunnable: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,6 +68,18 @@ class BlockingActivity : ComponentActivity() {
         blockedAppName = intent.getStringExtra("blocked_app_name") ?: "This app"
         blockedPackageName = intent.getStringExtra("blocked_package_name") ?: ""
 
+        // Aggressively kill the blocked app
+        killBlockedApp()
+
+        // Keep trying to kill it in case it restarts
+        killAppRunnable = object : Runnable {
+            override fun run() {
+                killBlockedApp()
+                handler.postDelayed(this, 500) // Check every 500ms
+            }
+        }
+        handler.post(killAppRunnable!!)
+
         // Handle back button press - send user to home instead of previous app
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
@@ -88,6 +107,28 @@ class BlockingActivity : ComponentActivity() {
         }
     }
 
+    private fun killBlockedApp() {
+        if (blockedPackageName.isEmpty()) return
+
+        try {
+            val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+
+            // Kill background processes
+            activityManager.killBackgroundProcesses(blockedPackageName)
+
+            // Note: We can't force-stop apps without FORCE_STOP_PACKAGES permission
+            // But killing background processes helps reduce the app's presence
+        } catch (e: Exception) {
+            // Ignore exceptions - not critical if this fails
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Stop the kill loop
+        killAppRunnable?.let { handler.removeCallbacks(it) }
+    }
+
     private fun goToHomeScreen() {
         val homeIntent = Intent(Intent.ACTION_MAIN).apply {
             addCategory(Intent.CATEGORY_HOME)
@@ -101,6 +142,28 @@ class BlockingActivity : ComponentActivity() {
         super.onUserLeaveHint()
         // User pressed home button - close this activity
         finish()
+    }
+
+    // Prevent the activity from being minimized or moved to background while blocking
+    override fun onPause() {
+        super.onPause()
+        // If we're pausing and haven't explicitly called finish(), bring ourselves back
+        val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val tasks = activityManager.appTasks
+        if (tasks.isNotEmpty() && !isFinishing) {
+            // Re-launch ourselves if we detect the blocked app trying to come forward
+            handler.postDelayed({
+                if (!isFinishing) {
+                    val intent = Intent(this, BlockingActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        putExtra("blocked_app_name", blockedAppName)
+                        putExtra("blocked_package_name", blockedPackageName)
+                    }
+                    startActivity(intent)
+                }
+            }, 100)
+        }
     }
 }
 

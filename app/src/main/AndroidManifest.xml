@@ -13,7 +13,7 @@
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
-    <!-- Package usage stats permission - CRITICAL FOR APP MONITORING -->
+    <!-- Package usage stats permission - For insights and stats -->
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
 
@@ -25,6 +25,9 @@
 
     <!-- For Android 14+ (API 34) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+    <!-- System Alert Window - for drawing over other apps (fallback method) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
 
     <application
         android:allowBackup="true"
@@ -59,11 +62,29 @@
         <activity
             android:name=".BlockingActivity"
             android:exported="false"
-            android:launchMode="singleTask"
+            android:launchMode="singleInstance"
+            android:taskAffinity="com.example.locked.blocking"
             android:excludeFromRecents="true"
-            android:theme="@style/Theme.Locked" />
+            android:noHistory="false"
+            android:theme="@style/Theme.Locked"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:screenOrientation="portrait" />
 
-        <!-- App Blocking Service -->
+        <!-- APPROACH 1: AccessibilityService - GOLD STANDARD for app blocking -->
+        <service
+            android:name=".service.AppBlockingAccessibilityService"
+            android:exported="false"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!-- APPROACH 2 (Fallback): App Blocking Service using UsageStats -->
         <service
             android:name=".service.AppBlockingService"
             android:enabled="true"
