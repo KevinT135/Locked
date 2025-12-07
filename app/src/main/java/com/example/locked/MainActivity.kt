@@ -1052,7 +1052,6 @@ fun StatusScreen(
     }
 }
 
-// Keep the same AppSelectionScreen and InsightsScreen composables from before
 @Composable
 fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
     val scope = rememberCoroutineScope()
@@ -1061,10 +1060,31 @@ fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
     var availableApps by remember { mutableStateOf<List<AppInfo>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
 
+    // Search and filter state
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedCategory by remember { mutableStateOf("All") }
+    var showFilterMenu by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
         scope.launch {
             availableApps = getInstalledApps(context)
             isLoading = false
+        }
+    }
+
+    // Get unique categories from available apps
+    val categories = remember(availableApps) {
+        listOf("All") + availableApps.map { it.category }.distinct().sorted()
+    }
+
+    // Filter apps based on search query and category
+    val filteredApps = remember(availableApps, searchQuery, selectedCategory) {
+        availableApps.filter { app ->
+            val matchesSearch = searchQuery.isEmpty() ||
+                    app.appName.contains(searchQuery, ignoreCase = true) ||
+                    app.packageName.contains(searchQuery, ignoreCase = true)
+            val matchesCategory = selectedCategory == "All" || app.category == selectedCategory
+            matchesSearch && matchesCategory
         }
     }
 
@@ -1109,6 +1129,90 @@ fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
             }
         }
 
+        // Search and Filter Section
+        if (!isLoading) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp, 8.dp, 16.dp, 0.dp)
+            ) {
+                // Search Bar
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("Search apps...") },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Text("✕")
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    enabled = !isLocked
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Category Filter
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Category: $selectedCategory",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium
+                    )
+
+                    Box {
+                        OutlinedButton(
+                            onClick = { showFilterMenu = true },
+                            enabled = !isLocked
+                        ) {
+                            Text("Filter")
+                        }
+
+                        DropdownMenu(
+                            expanded = showFilterMenu,
+                            onDismissRequest = { showFilterMenu = false }
+                        ) {
+                            categories.forEach { category ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(category)
+                                            if (category == selectedCategory) {
+                                                Text("✓", color = MaterialTheme.colorScheme.primary)
+                                            }
+                                        }
+                                    },
+                                    onClick = {
+                                        selectedCategory = category
+                                        showFilterMenu = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // Results count
+                Text(
+                    "${filteredApps.size} apps found",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+        }
+
         if (isLoading) {
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -1117,74 +1221,98 @@ fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
                 CircularProgressIndicator()
             }
         } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(availableApps) { app ->
-                    val isBlocked = blockedApps.any { it.packageName == app.packageName }
-
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        onClick = {
-                            if (!isLocked) {
-                                scope.launch {
-                                    if (isBlocked) {
-                                        repository.setAppBlocked(app.packageName, false)
-                                    } else {
-                                        repository.addBlockedApp(
-                                            packageName = app.packageName,
-                                            appName = app.appName,
-                                            category = app.category
-                                        )
-                                    }
-                                }
-                            } else {
-                                Toast.makeText(
-                                    context,
-                                    "Unlock first to modify blocked apps",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        },
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isLocked)
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
-                            else
-                                MaterialTheme.colorScheme.surface
-                        )
+            if (filteredApps.isEmpty()) {
+                // Empty state
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                        Text(
+                            "No apps found",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Try adjusting your search or filter",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filteredApps) { app ->
+                        val isBlocked = blockedApps.any { it.packageName == app.packageName }
+
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = {
+                                if (!isLocked) {
+                                    scope.launch {
+                                        if (isBlocked) {
+                                            repository.setAppBlocked(app.packageName, false)
+                                        } else {
+                                            repository.addBlockedApp(
+                                                packageName = app.packageName,
+                                                appName = app.appName,
+                                                category = app.category
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "Unlock first to modify blocked apps",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isLocked)
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                else
+                                    MaterialTheme.colorScheme.surface
+                            )
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    app.appName,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    fontWeight = FontWeight.Medium,
-                                    color = if (isLocked)
-                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                                    else
-                                        MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    app.category,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
-                                        alpha = if (isLocked) 0.5f else 1f
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        app.appName,
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        fontWeight = FontWeight.Medium,
+                                        color = if (isLocked)
+                                            MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                        else
+                                            MaterialTheme.colorScheme.onSurface
                                     )
+                                    Text(
+                                        app.category,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(
+                                            alpha = if (isLocked) 0.5f else 1f
+                                        )
+                                    )
+                                }
+                                Checkbox(
+                                    checked = isBlocked,
+                                    onCheckedChange = null,
+                                    enabled = !isLocked
                                 )
                             }
-                            Checkbox(
-                                checked = isBlocked,
-                                onCheckedChange = null,
-                                enabled = !isLocked
-                            )
                         }
                     }
                 }
