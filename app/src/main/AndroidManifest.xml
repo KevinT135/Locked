@@ -17,6 +17,9 @@
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- Permission to kill background processes -->
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+
     <!-- Foreground service permission for Android 9+ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
@@ -51,6 +54,14 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+
+        <!-- Blocking Activity - Fullscreen overlay when apps are blocked -->
+        <activity
+            android:name=".BlockingActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.Locked" />
 
         <!-- App Blocking Service -->
         <service

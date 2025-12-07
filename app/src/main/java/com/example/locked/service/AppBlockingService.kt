@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import com.example.locked.BlockingActivity
 import com.example.locked.MainActivity
 import com.example.locked.R
 import com.example.locked.data.LockedRepository
@@ -28,10 +29,11 @@ class AppBlockingService : Service() {
 
     private val NOTIFICATION_CHANNEL_ID = "app_blocking_channel"
     private val NOTIFICATION_ID = 1
-    private val CHECK_INTERVAL = 500L // Check every 500ms for better responsiveness
+    private val CHECK_INTERVAL = 300L // Check every 300ms for faster blocking
 
     private var lastForegroundApp: String? = null
-    private var lastCheckTime: Long = 0
+    private var lastBlockTime: Long = 0
+    private val BLOCK_COOLDOWN = 1000L // Minimum 1 second between blocks of same app
 
     companion object {
         const val ACTION_LOCK = "com.example.locked.LOCK"
@@ -120,35 +122,52 @@ class AppBlockingService : Service() {
     private suspend fun checkAndBlockApps() {
         try {
             val currentApp = getForegroundApp()
+            val currentTime = System.currentTimeMillis()
 
             if (currentApp != null &&
                 currentApp != packageName &&
-                currentApp != lastForegroundApp) {
+                currentApp != "com.example.locked") {  // Don't block our own activities
 
-                Log.d(TAG, "Detected app: $currentApp")
-                lastForegroundApp = currentApp
+                // Only log if it's a new app to reduce spam
+                if (currentApp != lastForegroundApp) {
+                    Log.d(TAG, "Detected app: $currentApp")
+                }
 
                 // Check if app is blocked
                 val isBlocked = repository.isAppBlocked(currentApp)
 
                 if (isBlocked && isLocked) {
-                    Log.d(TAG, "BLOCKING app: $currentApp")
+                    // Check cooldown to prevent blocking the same app too rapidly
+                    if (currentApp != lastForegroundApp ||
+                        currentTime - lastBlockTime > BLOCK_COOLDOWN) {
 
-                    // Record the attempt
-                    withContext(Dispatchers.IO) {
-                        repository.recordUsageEvent(
-                            packageName = currentApp,
-                            appName = getAppName(currentApp),
-                            category = getCategoryForPackage(currentApp),
-                            sessionDuration = 0,
-                            wasBlocked = true,
-                            unlockAttempted = true,
-                            unlockSucceeded = false
-                        )
+                        val appName = getAppName(currentApp)
+                        Log.d(TAG, "BLOCKING app: $currentApp ($appName)")
+
+                        lastBlockTime = currentTime
+
+                        // Record the attempt
+                        withContext(Dispatchers.IO) {
+                            repository.recordUsageEvent(
+                                packageName = currentApp,
+                                appName = appName,
+                                category = getCategoryForPackage(currentApp),
+                                sessionDuration = 0,
+                                wasBlocked = true,
+                                unlockAttempted = true,
+                                unlockSucceeded = false
+                            )
+                        }
+
+                        // Block the app with dedicated blocking screen
+                        blockApp(currentApp, appName)
+
+                        // Reset tracking so we can detect if user tries to open it again
+                        lastForegroundApp = null
                     }
-
-                    // Block the app by bringing our app to foreground
-                    blockApp()
+                } else {
+                    // Track non-blocked apps normally
+                    lastForegroundApp = currentApp
                 }
             }
         } catch (e: Exception) {
@@ -183,13 +202,14 @@ class AppBlockingService : Service() {
         return lastResumedApp
     }
 
-    private fun blockApp() {
-        // Bring the blocking activity to foreground
-        val intent = Intent(this, MainActivity::class.java).apply {
+    private fun blockApp(packageName: String, appName: String) {
+        // Launch the dedicated blocking activity
+        val intent = Intent(this, BlockingActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
-            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
-            putExtra("show_blocked_message", true)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+            putExtra("blocked_app_name", appName)
+            putExtra("blocked_package_name", packageName)
         }
         startActivity(intent)
     }
