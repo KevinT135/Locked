@@ -1306,6 +1306,34 @@ fun InsightsScreen(repository: LockedRepository) {
 
                     Spacer(modifier = Modifier.height(12.dp))
 
+                    // Export Data Button
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                try {
+                                    val exporter = com.example.locked.ml.DataExporter(context)
+                                    val file = exporter.exportToCSV()
+                                    Toast.makeText(
+                                        context,
+                                        "Data exported to: ${file.absolutePath}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } catch (e: Exception) {
+                                    Toast.makeText(
+                                        context,
+                                        "Export failed: ${e.message}",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Export Training Data (CSV)")
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
