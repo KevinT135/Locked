@@ -684,7 +684,7 @@ fun InsightsScreen(repository: LockedRepository) {
                     )
                     if (event.wasBlocked) {
                         Text(
-                            "✋ Blocked attempt",
+                            "Blocked attempt",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                             fontWeight = FontWeight.Bold

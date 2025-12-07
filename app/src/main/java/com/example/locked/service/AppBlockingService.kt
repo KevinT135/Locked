@@ -6,9 +6,14 @@ import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.provider.Settings
 import android.util.Log
+import android.view.Gravity
+import android.view.WindowManager
+import android.widget.FrameLayout
 import androidx.core.app.NotificationCompat
 import com.example.locked.BlockingActivity
 import com.example.locked.MainActivity
@@ -17,8 +22,13 @@ import com.example.locked.data.LockedRepository
 import kotlinx.coroutines.*
 
 /**
- * Foreground service that continuously monitors app usage and blocks configured apps
- * Uses UsageStatsManager to detect app launches
+ * SIMPLIFIED APPROACH - Faster polling + System Overlay
+ *
+ * Key improvements:
+ * 1. Faster polling (100ms instead of 300ms)
+ * 2. Full-screen overlay that covers everything
+ * 3. Immediately bring blocking activity to front
+ * 4. Send HOME intent to close blocked app
  */
 class AppBlockingService : Service() {
 
@@ -26,14 +36,16 @@ class AppBlockingService : Service() {
     private lateinit var repository: LockedRepository
     private var isLocked = true
     private var monitoringJob: Job? = null
+    private var windowManager: WindowManager? = null
+    private var overlayView: FrameLayout? = null
 
     private val NOTIFICATION_CHANNEL_ID = "app_blocking_channel"
     private val NOTIFICATION_ID = 1
-    private val CHECK_INTERVAL = 300L // Check every 300ms for faster blocking
+    private val CHECK_INTERVAL = 100L // Faster! 100ms instead of 300ms
 
     private var lastForegroundApp: String? = null
     private var lastBlockTime: Long = 0
-    private val BLOCK_COOLDOWN = 1000L // Minimum 1 second between blocks of same app
+    private val BLOCK_COOLDOWN = 500L // Reduced cooldown
 
     companion object {
         const val ACTION_LOCK = "com.example.locked.LOCK"
@@ -65,7 +77,7 @@ class AppBlockingService : Service() {
                     repository.startBlockingSession()
                 }
                 startMonitoring()
-                updateNotification("Apps LOCKED - Monitoring active")
+                updateNotification("🔒 Apps LOCKED - Blocking active")
                 Log.d(TAG, "Apps locked, monitoring started")
             }
             ACTION_UNLOCK -> {
@@ -74,15 +86,15 @@ class AppBlockingService : Service() {
                     repository.endBlockingSession("nfc")
                 }
                 stopMonitoring()
-                updateNotification("Apps UNLOCKED")
+                updateNotification("🔓 Apps UNLOCKED")
                 Log.d(TAG, "Apps unlocked, monitoring stopped")
             }
             else -> {
                 if (isLocked) {
                     startMonitoring()
-                    updateNotification("Apps LOCKED - Monitoring active")
+                    updateNotification("🔒 Apps LOCKED - Blocking active")
                 } else {
-                    updateNotification("Apps UNLOCKED")
+                    updateNotification("🔓 Apps UNLOCKED")
                 }
             }
         }
@@ -97,6 +109,7 @@ class AppBlockingService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         stopMonitoring()
+        removeOverlay()
         serviceScope.cancel()
         isServiceRunning = false
         Log.d(TAG, "Service destroyed")
@@ -104,7 +117,7 @@ class AppBlockingService : Service() {
 
     private fun startMonitoring() {
         stopMonitoring()
-        Log.d(TAG, "Starting app monitoring")
+        Log.d(TAG, "Starting app monitoring (100ms polling)")
         monitoringJob = serviceScope.launch {
             while (isActive && isLocked) {
                 checkAndBlockApps()
@@ -116,6 +129,7 @@ class AppBlockingService : Service() {
     private fun stopMonitoring() {
         monitoringJob?.cancel()
         monitoringJob = null
+        removeOverlay()
         Log.d(TAG, "Stopped app monitoring")
     }
 
@@ -126,9 +140,10 @@ class AppBlockingService : Service() {
 
             if (currentApp != null &&
                 currentApp != packageName &&
-                currentApp != "com.example.locked") {  // Don't block our own activities
+                currentApp != "com.example.locked" &&
+                !currentApp.startsWith("com.android.launcher")) {
 
-                // Only log if it's a new app to reduce spam
+                // Only log if it's a new app
                 if (currentApp != lastForegroundApp) {
                     Log.d(TAG, "Detected app: $currentApp")
                 }
@@ -137,14 +152,15 @@ class AppBlockingService : Service() {
                 val isBlocked = repository.isAppBlocked(currentApp)
 
                 if (isBlocked && isLocked) {
-                    // Check cooldown to prevent blocking the same app too rapidly
+                    // Check cooldown
                     if (currentApp != lastForegroundApp ||
                         currentTime - lastBlockTime > BLOCK_COOLDOWN) {
 
                         val appName = getAppName(currentApp)
-                        Log.d(TAG, "BLOCKING app: $currentApp ($appName)")
+                        Log.d(TAG, "🚫 BLOCKING APP: $currentApp ($appName)")
 
                         lastBlockTime = currentTime
+                        lastForegroundApp = currentApp
 
                         // Record the attempt
                         withContext(Dispatchers.IO) {
@@ -159,19 +175,114 @@ class AppBlockingService : Service() {
                             )
                         }
 
-                        // Block the app with dedicated blocking screen
-                        blockApp(currentApp, appName)
-
-                        // Reset tracking so we can detect if user tries to open it again
-                        lastForegroundApp = null
+                        // AGGRESSIVE BLOCKING - Use multiple methods
+                        blockAppAggressively(currentApp, appName)
                     }
                 } else {
-                    // Track non-blocked apps normally
                     lastForegroundApp = currentApp
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error checking apps", e)
+        }
+    }
+
+    private fun blockAppAggressively(packageName: String, appName: String) {
+        // Method 1: Launch blocking activity with aggressive flags
+        val blockIntent = Intent(this, BlockingActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
+            addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
+            addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
+            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            putExtra("blocked_app_name", appName)
+            putExtra("blocked_package_name", packageName)
+        }
+        startActivity(blockIntent)
+
+        // Method 2: Also send HOME intent to close the blocked app
+        serviceScope.launch {
+            delay(150) // Brief delay for blocking activity to appear
+            sendHomeIntent()
+        }
+
+        // Method 3: Show system overlay (if permission granted)
+        if (canDrawOverlays()) {
+            showBlockingOverlay()
+        }
+
+        Log.d(TAG, "Executed aggressive blocking for: $packageName")
+    }
+
+    private fun sendHomeIntent() {
+        try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(homeIntent)
+            Log.d(TAG, "Sent HOME intent")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send HOME intent", e)
+        }
+    }
+
+    private fun canDrawOverlays(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(this)
+        } else {
+            true
+        }
+    }
+
+    @SuppressLint("InflateParams")
+    private fun showBlockingOverlay() {
+        try {
+            if (overlayView != null) return // Already showing
+
+            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+            overlayView = FrameLayout(this).apply {
+                setBackgroundColor(android.graphics.Color.parseColor("#F44336")) // Red background
+            }
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WindowManager.LayoutParams.TYPE_PHONE
+                },
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.CENTER
+            }
+
+            windowManager?.addView(overlayView, params)
+
+            // Remove overlay after a brief moment (blocking activity should be shown)
+            serviceScope.launch {
+                delay(1000)
+                removeOverlay()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to show overlay", e)
+        }
+    }
+
+    private fun removeOverlay() {
+        try {
+            overlayView?.let {
+                windowManager?.removeView(it)
+                overlayView = null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to remove overlay", e)
         }
     }
 
@@ -184,8 +295,8 @@ class AppBlockingService : Service() {
 
         val currentTime = System.currentTimeMillis()
 
-        // Query usage events from the last 1 second
-        val events = usageStatsManager.queryEvents(currentTime - 1000, currentTime)
+        // Query events from the last 500ms (wider window for better detection)
+        val events = usageStatsManager.queryEvents(currentTime - 500, currentTime)
 
         var lastResumedApp: String? = null
         val event = UsageEvents.Event()
@@ -200,18 +311,6 @@ class AppBlockingService : Service() {
         }
 
         return lastResumedApp
-    }
-
-    private fun blockApp(packageName: String, appName: String) {
-        // Launch the dedicated blocking activity
-        val intent = Intent(this, BlockingActivity::class.java).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            addFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
-            addFlags(Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS)
-            putExtra("blocked_app_name", appName)
-            putExtra("blocked_package_name", packageName)
-        }
-        startActivity(intent)
     }
 
     private fun getAppName(packageName: String): String {
