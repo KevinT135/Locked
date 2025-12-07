@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Build
@@ -40,19 +41,26 @@ class MainActivity : ComponentActivity() {
     private var nfcAdapter: NfcAdapter? = null
     private lateinit var repository: LockedRepository
     private lateinit var predictor: UsagePredictor
+    private lateinit var nfcCardManager: NfcCardManager
+
     private var isLocked by mutableStateOf(true)
     private var hasUsagePermission by mutableStateOf(false)
+    private var hasOverlayPermission by mutableStateOf(false)
+    private var isCardPaired by mutableStateOf(false)
+    private var showPairingDialog by mutableStateOf(false)
+    private var pairingMode by mutableStateOf(false)
 
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (!isGranted) {
-            Toast.makeText(this, "Notification permission required for service", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Notification permission recommended", Toast.LENGTH_SHORT).show()
         }
     }
 
     companion object {
         private const val TAG = "MainActivity"
+        private const val OVERLAY_PERMISSION_REQUEST_CODE = 1234
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -60,11 +68,17 @@ class MainActivity : ComponentActivity() {
 
         repository = LockedRepository(applicationContext)
         predictor = UsagePredictor(applicationContext)
+        nfcCardManager = NfcCardManager(applicationContext)
         nfcAdapter = NfcAdapter.getDefaultAdapter(this)
 
-        // Check permissions
+        // Check permissions and pairing status
         hasUsagePermission = hasUsageStatsPermission()
+        hasOverlayPermission = canDrawOverlays()
+        isCardPaired = nfcCardManager.isCardPaired()
+
         Log.d(TAG, "Has usage permission: $hasUsagePermission")
+        Log.d(TAG, "Has overlay permission: $hasOverlayPermission")
+        Log.d(TAG, "Card paired: $isCardPaired")
 
         // Check if we should show blocked message
         val showBlockedMessage = intent.getBooleanExtra("show_blocked_message", false)
@@ -82,11 +96,25 @@ class MainActivity : ComponentActivity() {
                 LockedApp(
                     isLocked = isLocked,
                     hasUsagePermission = hasUsagePermission,
+                    hasOverlayPermission = hasOverlayPermission,
+                    isCardPaired = isCardPaired,
                     showBlockedMessage = showBlockedMessage,
-                    onNfcScan = { handleNfcToggle() },
+                    showPairingDialog = showPairingDialog,
+                    pairingMode = pairingMode,
+                    onStartPairing = {
+                        pairingMode = true
+                        showPairingDialog = true
+                    },
+                    onCancelPairing = {
+                        pairingMode = false
+                        showPairingDialog = false
+                    },
+                    onUnpairCard = { handleUnpairCard() },
                     repository = repository,
                     predictor = predictor,
-                    onRequestUsagePermission = { requestUsageStatsPermission() }
+                    nfcCardManager = nfcCardManager,
+                    onRequestUsagePermission = { requestUsageStatsPermission() },
+                    onRequestOverlayPermission = { requestOverlayPermission() }
                 )
             }
         }
@@ -97,14 +125,22 @@ class MainActivity : ComponentActivity() {
         enableNfcForegroundDispatch()
 
         // Recheck permission status
-        val hadPermission = hasUsagePermission
-        hasUsagePermission = hasUsageStatsPermission()
+        val hadUsagePermission = hasUsagePermission
+        val hadOverlayPermission = hasOverlayPermission
 
-        if (!hadPermission && hasUsagePermission) {
-            Toast.makeText(this, "Usage permission granted! You can now lock apps.", Toast.LENGTH_LONG).show()
+        hasUsagePermission = hasUsageStatsPermission()
+        hasOverlayPermission = canDrawOverlays()
+        isCardPaired = nfcCardManager.isCardPaired()
+
+        if (!hadUsagePermission && hasUsagePermission) {
+            Toast.makeText(this, "✓ Usage permission granted!", Toast.LENGTH_SHORT).show()
         }
 
-        Log.d(TAG, "onResume - Has usage permission: $hasUsagePermission")
+        if (!hadOverlayPermission && hasOverlayPermission) {
+            Toast.makeText(this, "✓ Overlay permission granted!", Toast.LENGTH_SHORT).show()
+        }
+
+        Log.d(TAG, "onResume - Usage: $hasUsagePermission, Overlay: $hasOverlayPermission, Card: $isCardPaired")
     }
 
     override fun onPause() {
@@ -123,12 +159,99 @@ class MainActivity : ComponentActivity() {
                 intent.getParcelableExtra(NfcAdapter.EXTRA_TAG)
             }
             if (tag != null) {
-                handleNfcToggle()
+                handleNfcScan(tag)
             }
         }
     }
 
+    private fun handleNfcScan(tag: Tag) {
+        // If in pairing mode, pair the card
+        if (pairingMode) {
+            handlePairCard(tag)
+            return
+        }
+
+        // Check if card is paired
+        if (!isCardPaired) {
+            Toast.makeText(
+                this,
+                "No card paired! Please pair an NFC card first.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        // Verify the card matches
+        if (!nfcCardManager.verifyCard(tag)) {
+            Toast.makeText(
+                this,
+                "⚠️ Wrong NFC card! Only your paired card can unlock.",
+                Toast.LENGTH_LONG
+            ).show()
+            Log.w(TAG, "Card verification failed - wrong card used")
+            return
+        }
+
+        // Card verified, proceed with toggle
+        handleNfcToggle()
+    }
+
+    private fun handlePairCard(tag: Tag) {
+        val success = nfcCardManager.pairCard(tag)
+
+        if (success) {
+            isCardPaired = true
+            pairingMode = false
+            showPairingDialog = false
+
+            val cardId = nfcCardManager.getPairedCardDisplayId()
+            Toast.makeText(
+                this,
+                "✓ NFC card paired successfully!\nCard ID: $cardId",
+                Toast.LENGTH_LONG
+            ).show()
+
+            Log.d(TAG, "Card paired successfully")
+        } else {
+            Toast.makeText(
+                this,
+                "Failed to pair card. Please try again.",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            Log.e(TAG, "Failed to pair card")
+        }
+    }
+
+    private fun handleUnpairCard() {
+        val success = nfcCardManager.unpairCard()
+
+        if (success) {
+            isCardPaired = false
+            isLocked = true
+
+            // Stop the service if running
+            val serviceIntent = Intent(this, AppBlockingService::class.java)
+            stopService(serviceIntent)
+
+            Toast.makeText(
+                this,
+                "Card unpaired. You'll need to pair a new card.",
+                Toast.LENGTH_SHORT
+            ).show()
+
+            Log.d(TAG, "Card unpaired")
+        } else {
+            Toast.makeText(
+                this,
+                "Failed to unpair card",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
     private fun handleNfcToggle() {
+        // Check all required permissions
         if (!hasUsageStatsPermission()) {
             Toast.makeText(
                 this,
@@ -136,6 +259,16 @@ class MainActivity : ComponentActivity() {
                 Toast.LENGTH_LONG
             ).show()
             requestUsageStatsPermission()
+            return
+        }
+
+        if (!canDrawOverlays()) {
+            Toast.makeText(
+                this,
+                "Please grant Display Over Other Apps permission!",
+                Toast.LENGTH_LONG
+            ).show()
+            requestOverlayPermission()
             return
         }
 
@@ -162,9 +295,9 @@ class MainActivity : ComponentActivity() {
             }
 
             val message = if (isLocked) {
-                "Apps locked! Service is monitoring."
+                "🔒 Apps locked! Overlay blocking active."
             } else {
-                "Apps unlocked!"
+                "🔓 Apps unlocked!"
             }
             Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
 
@@ -172,6 +305,41 @@ class MainActivity : ComponentActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Error starting service", e)
             Toast.makeText(this, "Error starting service: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun requestOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!Settings.canDrawOverlays(this)) {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+                try {
+                    startActivityForResult(intent, OVERLAY_PERMISSION_REQUEST_CODE)
+                    Toast.makeText(
+                        this,
+                        "Please enable 'Display over other apps' permission",
+                        Toast.LENGTH_LONG
+                    ).show()
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        this,
+                        "Go to: Settings > Apps > Special Access > Display over other apps",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            } else {
+                Toast.makeText(this, "Overlay permission already granted!", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun canDrawOverlays(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(this)
+        } else {
+            true
         }
     }
 
@@ -237,13 +405,28 @@ class MainActivity : ComponentActivity() {
 fun LockedApp(
     isLocked: Boolean,
     hasUsagePermission: Boolean,
+    hasOverlayPermission: Boolean,
+    isCardPaired: Boolean,
     showBlockedMessage: Boolean,
-    onNfcScan: () -> Unit,
+    showPairingDialog: Boolean,
+    pairingMode: Boolean,
+    onStartPairing: () -> Unit,
+    onCancelPairing: () -> Unit,
+    onUnpairCard: () -> Unit,
     repository: LockedRepository,
     predictor: UsagePredictor,
-    onRequestUsagePermission: () -> Unit
+    nfcCardManager: NfcCardManager,
+    onRequestUsagePermission: () -> Unit,
+    onRequestOverlayPermission: () -> Unit
 ) {
     var selectedTab by remember { mutableStateOf(0) }
+
+    // Show pairing dialog
+    if (showPairingDialog) {
+        PairingDialog(
+            onDismiss = onCancelPairing
+        )
+    }
 
     Scaffold(
         topBar = {
@@ -256,7 +439,77 @@ fun LockedApp(
         }
     ) { padding ->
         Column(modifier = Modifier.padding(padding)) {
-            // Permission warning banner
+            // Card pairing warning banner
+            if (!isCardPaired) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "No NFC Card Paired",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "Pair an NFC card to enable locking",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Button(onClick = onStartPairing) {
+                            Text("Pair Card")
+                        }
+                    }
+                }
+            }
+
+            // Overlay permission warning banner
+            if (!hasOverlayPermission) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                "Overlay Permission Required",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Text(
+                                "Required to show blocking screen",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Button(onClick = onRequestOverlayPermission) {
+                            Text("Grant")
+                        }
+                    }
+                }
+            }
+
+            // Usage permission warning banner
             if (!hasUsagePermission) {
                 Card(
                     modifier = Modifier
@@ -275,16 +528,16 @@ fun LockedApp(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                "Permission Required",
+                                "Usage Access Required",
                                 style = MaterialTheme.typography.titleSmall,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                "App blocking won't work without Usage Access",
+                                "Required to detect app usage",
                                 style = MaterialTheme.typography.bodySmall
                             )
                         }
-                        TextButton(onClick = onRequestUsagePermission) {
+                        Button(onClick = onRequestUsagePermission) {
                             Text("Grant")
                         }
                     }
@@ -313,9 +566,15 @@ fun LockedApp(
                 0 -> StatusScreen(
                     isLocked = isLocked,
                     hasUsagePermission = hasUsagePermission,
+                    hasOverlayPermission = hasOverlayPermission,
+                    isCardPaired = isCardPaired,
                     showBlockedMessage = showBlockedMessage,
                     predictor = predictor,
-                    onRequestPermission = onRequestUsagePermission
+                    nfcCardManager = nfcCardManager,
+                    onRequestUsagePermission = onRequestUsagePermission,
+                    onRequestOverlayPermission = onRequestOverlayPermission,
+                    onStartPairing = onStartPairing,
+                    onUnpairCard = onUnpairCard
                 )
                 1 -> AppSelectionScreen(repository = repository, isLocked = isLocked)
                 2 -> InsightsScreen(repository = repository)
@@ -325,15 +584,67 @@ fun LockedApp(
 }
 
 @Composable
+fun PairingDialog(
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Text("📱", style = MaterialTheme.typography.headlineLarge) },
+        title = { Text("Pair NFC Card") },
+        text = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    "Hold your NFC card near the back of your phone to pair it.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                CircularProgressIndicator(modifier = Modifier.padding(16.dp))
+
+                Text(
+                    "Waiting for NFC card...",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    "⚠️ Only this specific card will work after pairing",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
 fun StatusScreen(
     isLocked: Boolean,
     hasUsagePermission: Boolean,
+    hasOverlayPermission: Boolean,
+    isCardPaired: Boolean,
     showBlockedMessage: Boolean,
     predictor: UsagePredictor,
-    onRequestPermission: () -> Unit
+    nfcCardManager: NfcCardManager,
+    onRequestUsagePermission: () -> Unit,
+    onRequestOverlayPermission: () -> Unit,
+    onStartPairing: () -> Unit,
+    onUnpairCard: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
     var riskAssessment by remember { mutableStateOf<com.example.locked.ml.RiskAssessment?>(null) }
+    var showUnpairDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         scope.launch {
@@ -345,148 +656,281 @@ fun StatusScreen(
         }
     }
 
-    Column(
+    // Unpair confirmation dialog
+    if (showUnpairDialog) {
+        AlertDialog(
+            onDismissRequest = { showUnpairDialog = false },
+            title = { Text("Unpair NFC Card?") },
+            text = {
+                Text("This will remove the current paired card. You'll need to pair a new card to use the app.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onUnpairCard()
+                        showUnpairDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("Unpair")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnpairDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         if (showBlockedMessage) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "Blocked App Detected",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text("This app is currently blocked. Scan your paired NFC card to unlock.")
+                    }
+                }
+            }
+        }
+
+        // NFC Card Status
+        item {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "NFC Card Status",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+
+                        if (isCardPaired) {
+                            Text(
+                                "✓ Paired",
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        } else {
+                            Text(
+                                "Not Paired",
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+
+                    HorizontalDivider()
+
+                    if (isCardPaired) {
+                        val cardId = nfcCardManager.getPairedCardDisplayId()
+                        Text(
+                            "Paired Card ID: $cardId",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { showUnpairDialog = true },
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Unpair Card")
+                            }
+                        }
+                    } else {
+                        Text(
+                            "No card paired. Pair an NFC card to enable locking.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Button(
+                            onClick = onStartPairing,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Pair NFC Card")
+                        }
+                    }
+                }
+            }
+        }
+
+        // Lock Status
+        item {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.errorContainer
+                    containerColor = if (isLocked)
+                        MaterialTheme.colorScheme.errorContainer
+                    else
+                        MaterialTheme.colorScheme.primaryContainer
                 )
             ) {
-                Column(modifier = Modifier.padding(16.dp)) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
                     Text(
-                        "Blocked App Detected",
-                        style = MaterialTheme.typography.titleMedium,
+                        text = if (isLocked) "🔒 LOCKED" else "🔓 UNLOCKED",
+                        style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.Bold
                     )
-                    Text("This app is currently blocked. Scan your NFC tag to unlock.")
-                }
-            }
-        }
-
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isLocked)
-                    MaterialTheme.colorScheme.errorContainer
-                else
-                    MaterialTheme.colorScheme.primaryContainer
-            )
-        ) {
-            Column(
-                modifier = Modifier.padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text(
-                    text = if (isLocked) "🔒 LOCKED" else "🔓 UNLOCKED",
-                    style = MaterialTheme.typography.headlineLarge,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Text(
-                    text = if (isLocked)
-                        "Scan NFC tag to unlock apps"
-                    else
-                        "Scan NFC tag to lock apps",
-                    style = MaterialTheme.typography.bodyLarge
-                )
-
-                if (isLocked && hasUsagePermission) {
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
-                        "✓ Service monitoring active",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onErrorContainer
+                        text = if (isLocked)
+                            "Scan your paired NFC card to unlock apps"
+                        else
+                            "Scan your paired NFC card to lock apps",
+                        style = MaterialTheme.typography.bodyLarge
                     )
+
+                    if (isLocked && hasUsagePermission && hasOverlayPermission && isCardPaired) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "✓ Overlay blocking active",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
                 }
             }
         }
 
+        // Risk Assessment
         riskAssessment?.let { assessment ->
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "AI Risk Assessment",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("Risk Level:")
+                            Text(
+                                text = assessment.riskLevel.name,
+                                color = when (assessment.riskLevel) {
+                                    RiskLevel.HIGH -> MaterialTheme.colorScheme.error
+                                    RiskLevel.MEDIUM -> MaterialTheme.colorScheme.tertiary
+                                    RiskLevel.LOW -> MaterialTheme.colorScheme.primary
+                                },
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        LinearProgressIndicator(
+                            progress = { assessment.riskScore },
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                        )
+
+                        Text(
+                            assessment.recommendation,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        // Setup Checklist
+        item {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        "AI Risk Assessment",
+                        "Setup Checklist",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text("Risk Level:")
-                        Text(
-                            text = assessment.riskLevel.name,
-                            color = when (assessment.riskLevel) {
-                                RiskLevel.HIGH -> MaterialTheme.colorScheme.error
-                                RiskLevel.MEDIUM -> MaterialTheme.colorScheme.tertiary
-                                RiskLevel.LOW -> MaterialTheme.colorScheme.primary
-                            },
-                            fontWeight = FontWeight.Bold
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (isCardPaired) "✅" else "❌")
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("1. Pair an NFC card")
                     }
 
-                    LinearProgressIndicator(
-                        progress = { assessment.riskScore },
-                        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-                    )
-
-                    Text(
-                        assessment.recommendation,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    "Setup Checklist",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (hasUsagePermission) "✅" else "❌")
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("1. Enable Usage Access permission")
-                }
-                Text("   2. Select apps to block in 'Select Apps' tab")
-                Text("   3. Scan NFC tag to lock")
-                Text("   4. Try opening a blocked app to test")
-
-                if (!hasUsagePermission) {
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Button(
-                        onClick = onRequestPermission,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Grant Usage Access Permission")
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (hasOverlayPermission) "✅" else "❌")
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("2. Enable Display Over Other Apps")
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        "Look for 'Locked' or 'com.example.locked' in the settings list",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(if (hasUsagePermission) "✅" else "❌")
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("3. Enable Usage Access permission")
+                    }
+
+                    Text("   4. Select apps to block in 'Select Apps' tab")
+                    Text("   5. Scan your NFC card to lock")
+                    Text("   6. Try opening a blocked app to test")
+
+                    val allPermissionsGranted = hasOverlayPermission && hasUsagePermission
+
+                    if (!allPermissionsGranted) {
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        if (!hasOverlayPermission) {
+                            Button(
+                                onClick = onRequestOverlayPermission,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Grant Overlay Permission")
+                            }
+                            Spacer(modifier = Modifier.height(8.dp))
+                        }
+
+                        if (!hasUsagePermission) {
+                            Button(
+                                onClick = onRequestUsagePermission,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("Grant Usage Access Permission")
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
+// Keep the same AppSelectionScreen and InsightsScreen composables from before
 @Composable
 fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
     val scope = rememberCoroutineScope()
@@ -503,7 +947,6 @@ fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Warning banner when locked
         if (isLocked) {
             Card(
                 modifier = Modifier
@@ -707,7 +1150,7 @@ private fun getInstalledApps(context: Context): List<AppInfo> {
     val packages = pm.getInstalledApplications(PackageManager.GET_META_DATA)
 
     return packages
-        .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 } // Non-system apps only
+        .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 }
         .map { appInfo ->
             AppInfo(
                 packageName = appInfo.packageName,
