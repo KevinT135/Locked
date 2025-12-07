@@ -46,6 +46,7 @@ class AppBlockingService : Service() {
 
     private var lastForegroundApp: String? = null
     private var isOverlayShowing = false
+    private var currentBlockStartTime: Long = 0
 
     companion object {
         const val ACTION_LOCK = "com.example.locked.LOCK"
@@ -150,15 +151,17 @@ class AppBlockingService : Service() {
                         val appName = getAppName(currentApp)
                         Log.d(TAG, "🚫 BLOCKING APP: $currentApp ($appName)")
 
+                        // Record when this block started (for individual app tracking)
+                        currentBlockStartTime = System.currentTimeMillis()
                         lastForegroundApp = currentApp
 
-                        // Record the attempt
+                        // Record the blocking attempt (with 0 duration for now)
                         withContext(Dispatchers.IO) {
                             repository.recordUsageEvent(
                                 packageName = currentApp,
                                 appName = appName,
                                 category = getCategoryForPackage(currentApp),
-                                sessionDuration = 0,
+                                sessionDuration = 0, // Individual app duration not tracked
                                 wasBlocked = true,
                                 unlockAttempted = true,
                                 unlockSucceeded = false
@@ -248,6 +251,7 @@ class AppBlockingService : Service() {
                 windowManager?.removeView(it)
                 overlayView = null
                 isOverlayShowing = false
+
                 Log.d(TAG, "Overlay removed")
             }
         } catch (e: Exception) {

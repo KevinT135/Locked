@@ -22,6 +22,9 @@ interface UsageEventDao {
 
     @Query("DELETE FROM usage_events WHERE timestamp < :cutoffTime")
     suspend fun deleteOldEvents(cutoffTime: Long)
+
+    @Query("DELETE FROM usage_events")
+    suspend fun deleteAllEvents()
 }
 
 @Dao
@@ -43,6 +46,9 @@ interface BlockedAppDao {
 
     @Query("UPDATE blocked_apps SET isBlocked = :isBlocked WHERE packageName = :packageName")
     suspend fun setAppBlocked(packageName: String, isBlocked: Boolean)
+
+    @Query("DELETE FROM blocked_apps")
+    suspend fun deleteAllBlockedApps()
 }
 
 @Dao
@@ -61,4 +67,7 @@ interface BlockingSessionDao {
 
     @Query("SELECT AVG(duration) FROM blocking_sessions WHERE duration IS NOT NULL")
     suspend fun getAverageSessionDuration(): Float?
+
+    @Query("DELETE FROM blocking_sessions")
+    suspend fun deleteAllSessions()
 }

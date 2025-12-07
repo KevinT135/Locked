@@ -122,4 +122,21 @@ class LockedRepository(context: Context) {
     fun getRecentSessions(limit: Int = 20): Flow<List<BlockingSession>> {
         return sessionDao.getRecentSessions(limit)
     }
+
+    suspend fun getCurrentSession(): BlockingSession? {
+        return sessionDao.getCurrentSession()
+    }
+
+    // Clear all data for testing/development
+    suspend fun clearAllData() {
+        usageEventDao.deleteAllEvents()
+        blockedAppDao.deleteAllBlockedApps()
+        sessionDao.deleteAllSessions()
+    }
+
+    suspend fun clearInsightsData() {
+        usageEventDao.deleteAllEvents()
+        sessionDao.deleteAllSessions()
+        // Keep blocked apps list
+    }
 }

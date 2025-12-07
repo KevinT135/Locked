@@ -28,12 +28,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import com.example.locked.data.BlockedApp
 import com.example.locked.data.LockedRepository
 import com.example.locked.ml.RiskLevel
 import com.example.locked.ml.UsagePredictor
 import com.example.locked.service.AppBlockingService
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -224,29 +226,49 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleUnpairCard() {
-        val success = nfcCardManager.unpairCard()
+        lifecycleScope.launch {
+            // First, end any active blocking session
+            repository.endBlockingSession("unpair")
 
-        if (success) {
-            isCardPaired = false
-            isLocked = true
+            // Unlock if currently locked
+            if (isLocked) {
+                isLocked = false
 
-            // Stop the service if running
-            val serviceIntent = Intent(this, AppBlockingService::class.java)
-            stopService(serviceIntent)
+                // Stop the blocking service
+                val serviceIntent = Intent(this@MainActivity, AppBlockingService::class.java).apply {
+                    action = AppBlockingService.ACTION_UNLOCK
+                }
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        startForegroundService(serviceIntent)
+                    } else {
+                        startService(serviceIntent)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping service", e)
+                }
+            }
 
-            Toast.makeText(
-                this,
-                "Card unpaired. You'll need to pair a new card.",
-                Toast.LENGTH_SHORT
-            ).show()
+            // Now unpair the card
+            val success = nfcCardManager.unpairCard()
 
-            Log.d(TAG, "Card unpaired")
-        } else {
-            Toast.makeText(
-                this,
-                "Failed to unpair card",
-                Toast.LENGTH_SHORT
-            ).show()
+            if (success) {
+                isCardPaired = false
+
+                Toast.makeText(
+                    this@MainActivity,
+                    "Card unpaired and apps unlocked. You'll need to pair a new card.",
+                    Toast.LENGTH_LONG
+                ).show()
+
+                Log.d(TAG, "Card unpaired and session ended")
+            } else {
+                Toast.makeText(
+                    this@MainActivity,
+                    "Failed to unpair card",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
         }
     }
 
@@ -570,6 +592,7 @@ fun LockedApp(
                     isCardPaired = isCardPaired,
                     showBlockedMessage = showBlockedMessage,
                     predictor = predictor,
+                    repository = repository,
                     nfcCardManager = nfcCardManager,
                     onRequestUsagePermission = onRequestUsagePermission,
                     onRequestOverlayPermission = onRequestOverlayPermission,
@@ -589,7 +612,6 @@ fun PairingDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        icon = { Text("📱", style = MaterialTheme.typography.headlineLarge) },
         title = { Text("Pair NFC Card") },
         text = {
             Column(
@@ -612,7 +634,7 @@ fun PairingDialog(
                 Spacer(modifier = Modifier.height(8.dp))
 
                 Text(
-                    "⚠️ Only this specific card will work after pairing",
+                    "Warning: Only this specific card will work after pairing",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.error,
                     fontWeight = FontWeight.Bold
@@ -636,6 +658,7 @@ fun StatusScreen(
     isCardPaired: Boolean,
     showBlockedMessage: Boolean,
     predictor: UsagePredictor,
+    repository: LockedRepository,
     nfcCardManager: NfcCardManager,
     onRequestUsagePermission: () -> Unit,
     onRequestOverlayPermission: () -> Unit,
@@ -662,7 +685,17 @@ fun StatusScreen(
             onDismissRequest = { showUnpairDialog = false },
             title = { Text("Unpair NFC Card?") },
             text = {
-                Text("This will remove the current paired card. You'll need to pair a new card to use the app.")
+                Column {
+                    if (isLocked) {
+                        Text(
+                            "This will unlock apps and end the current blocking session.",
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                    Text("The current paired card will be removed. You'll need to pair a new card to use the app again.")
+                }
             },
             confirmButton = {
                 Button(
@@ -674,7 +707,7 @@ fun StatusScreen(
                         containerColor = MaterialTheme.colorScheme.error
                     )
                 ) {
-                    Text("Unpair")
+                    Text(if (isLocked) "Unlock & Unpair" else "Unpair")
                 }
             },
             dismissButton = {
@@ -783,8 +816,28 @@ fun StatusScreen(
             }
         }
 
-        // Lock Status
+        // Lock Status with Timer
         item {
+            val currentSessionStart = remember { mutableStateOf<Long?>(null) }
+            val currentSessionTime = remember { mutableStateOf(0L) }
+
+            // Get current session from repository
+            LaunchedEffect(Unit) {
+                scope.launch {
+                    while (true) {
+                        val session = repository.getCurrentSession()
+                        if (session != null && isLocked) {
+                            currentSessionStart.value = session.startTime
+                            currentSessionTime.value = System.currentTimeMillis() - session.startTime
+                        } else {
+                            currentSessionStart.value = null
+                            currentSessionTime.value = 0L
+                        }
+                        delay(1000) // Update every second
+                    }
+                }
+            }
+
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(
@@ -799,10 +852,22 @@ fun StatusScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = if (isLocked) "🔒 LOCKED" else "🔓 UNLOCKED",
+                        text = if (isLocked) "LOCKED" else "UNLOCKED",
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.Bold
                     )
+
+                    if (isLocked && currentSessionTime.value > 0) {
+                        val minutes = (currentSessionTime.value / 1000) / 60
+                        val seconds = (currentSessionTime.value / 1000) % 60
+                        Text(
+                            text = String.format("Blocking for: %d:%02d", minutes, seconds),
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+
                     Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = if (isLocked)
@@ -818,6 +883,63 @@ fun StatusScreen(
                             "✓ Overlay blocking active",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
+        }
+
+        // Blocking Statistics (show when locked)
+        if (isLocked && hasUsagePermission) {
+            item {
+                val blockedEvents by repository.getRecentEvents(1000).collectAsState(initial = emptyList())
+                val todayBlockedCount = remember(blockedEvents) {
+                    val today = java.util.Calendar.getInstance().apply {
+                        set(java.util.Calendar.HOUR_OF_DAY, 0)
+                        set(java.util.Calendar.MINUTE, 0)
+                        set(java.util.Calendar.SECOND, 0)
+                        set(java.util.Calendar.MILLISECOND, 0)
+                    }.timeInMillis
+
+                    blockedEvents.count { it.wasBlocked && it.timestamp >= today }
+                }
+
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            "Today's Blocking Stats",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(
+                                    "$todayBlockedCount",
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    "Blocks",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            "Keep up the focus!",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
@@ -879,19 +1001,19 @@ fun StatusScreen(
                     Spacer(modifier = Modifier.height(8.dp))
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (isCardPaired) "✅" else "❌")
+                        Text(if (isCardPaired) "[✓]" else "[ ]", fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("1. Pair an NFC card")
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (hasOverlayPermission) "✅" else "❌")
+                        Text(if (hasOverlayPermission) "[✓]" else "[ ]", fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("2. Enable Display Over Other Apps")
                     }
 
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(if (hasUsagePermission) "✅" else "❌")
+                        Text(if (hasUsagePermission) "[✓]" else "[ ]", fontWeight = FontWeight.Bold)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("3. Enable Usage Access permission")
                     }
@@ -958,7 +1080,7 @@ fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Text(
-                        "⚠️ Apps are currently LOCKED",
+                        "Warning: Apps are currently LOCKED",
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold
                     )
@@ -1073,64 +1195,271 @@ fun AppSelectionScreen(repository: LockedRepository, isLocked: Boolean) {
 
 @Composable
 fun InsightsScreen(repository: LockedRepository) {
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     val recentEvents by repository.getRecentEvents(100).collectAsState(initial = emptyList())
     val recentSessions by repository.getRecentSessions(20).collectAsState(initial = emptyList())
+
+    var showClearDialog by remember { mutableStateOf(false) }
+    var clearType by remember { mutableStateOf("") }
+
+    // Calculate session-based statistics
+    val completedSessions = recentSessions.filter { it.duration != null }
+    val avgSessionDuration = if (completedSessions.isNotEmpty()) {
+        completedSessions.mapNotNull { it.duration }.average() / 60000.0 // minutes
+    } else 0.0
+
+    val totalSessionTime = completedSessions.mapNotNull { it.duration }.sum() / 60000 // minutes
+
+    // Calculate per-app blocking counts
+    val blockedAppCounts = recentEvents.filter { it.wasBlocked }
+        .groupBy { it.packageName }
+        .mapValues { it.value.size }
+        .toList()
+        .sortedByDescending { it.second }
+
+    // Clear data confirmation dialog
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = {
+                Text(
+                    when (clearType) {
+                        "insights" -> "Clear Insights Data?"
+                        else -> "Clear All Data?"
+                    }
+                )
+            },
+            text = {
+                Text(
+                    when (clearType) {
+                        "insights" -> "This will delete all usage events and session history. Your blocked apps list will be preserved."
+                        else -> "This will delete ALL data including blocked apps, usage events, and session history. This cannot be undone!"
+                    }
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            try {
+                                when (clearType) {
+                                    "insights" -> repository.clearInsightsData()
+                                    else -> repository.clearAllData()
+                                }
+                                Toast.makeText(
+                                    context,
+                                    "Data cleared successfully",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                            } catch (e: Exception) {
+                                Toast.makeText(
+                                    context,
+                                    "Error clearing data: ${e.message}",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
+                        showClearDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    )
+                ) {
+                    Text("Clear")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Developer Options Card
         item {
-            Card(modifier = Modifier.fillMaxWidth()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                )
+            ) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text(
-                        "Usage Statistics",
+                        "Developer Options",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    Text("Total Events Recorded: ${recentEvents.size}")
-                    Text("Blocking Sessions: ${recentSessions.size}")
 
-                    if (recentEvents.isNotEmpty()) {
-                        val avgDuration = recentEvents.map { it.sessionDuration }.average() / 60000
-                        Text("Avg Session: %.1f minutes".format(avgDuration))
+                    Text(
+                        "For testing and development purposes",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                    )
 
-                        val blockedCount = recentEvents.count { it.wasBlocked }
-                        Text("Blocked Attempts: $blockedCount")
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                clearType = "insights"
+                                showClearDialog = true
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Clear Insights", fontSize = 12.sp)
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                clearType = "all"
+                                showClearDialog = true
+                            },
+                            modifier = Modifier.weight(1f),
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text("Clear All", fontSize = 12.sp)
+                        }
                     }
                 }
             }
         }
 
+        // Overall Session Statistics
         item {
-            Text(
-                "Recent Activity",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold
-            )
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "Session Statistics",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text("Total Blocking Sessions: ${recentSessions.size}")
+                    if (avgSessionDuration > 0) {
+                        Text("Avg Session Duration: %.1f minutes".format(avgSessionDuration))
+                    }
+                    Text("Total Time Locked: ${totalSessionTime.toInt()} minutes")
+
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                    Text("Total Blocking Attempts: ${recentEvents.count { it.wasBlocked }}")
+                    Text("Events Recorded: ${recentEvents.size}")
+                }
+            }
         }
 
-        items(recentEvents.take(10)) { event ->
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        event.packageName,
-                        style = MaterialTheme.typography.bodyMedium,
-                        fontWeight = FontWeight.Medium
-                    )
-                    Text(
-                        "Duration: ${event.sessionDuration / 1000}s | Category: ${event.appCategory}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    if (event.wasBlocked) {
+        // Top Blocked Apps
+        if (blockedAppCounts.isNotEmpty()) {
+            item {
+                Text(
+                    "Most Blocked Apps",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            items(blockedAppCounts.take(10)) { (packageName, count) ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                packageName,
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                "$count blocking attempts",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                         Text(
-                            "Blocked attempt",
-                            style = MaterialTheme.typography.bodySmall,
+                            "$count×",
+                            style = MaterialTheme.typography.headlineSmall,
                             color = MaterialTheme.colorScheme.error,
                             fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+        }
+
+        // Recent Sessions
+        if (completedSessions.isNotEmpty()) {
+            item {
+                Text(
+                    "Recent Sessions",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            items(completedSessions.take(10)) { session ->
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        val duration = session.duration ?: 0L
+                        val hours = duration / 3600000
+                        val minutes = (duration % 3600000) / 60000
+                        val seconds = (duration % 60000) / 1000
+
+                        val durationText = when {
+                            hours > 0 -> "${hours}h ${minutes}m"
+                            minutes > 0 -> "${minutes}m ${seconds}s"
+                            else -> "${seconds}s"
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                "Session Duration",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.Medium
+                            )
+                            Text(
+                                durationText,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Text(
+                            "Unlocked via: ${session.unlockMethod}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        val startTime = java.text.SimpleDateFormat(
+                            "MMM dd, h:mm a",
+                            java.util.Locale.getDefault()
+                        ).format(java.util.Date(session.startTime))
+
+                        Text(
+                            startTime,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
